@@ -28,7 +28,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
@@ -59,9 +59,48 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}   
 
       - name: Build and tag Docker image
-        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:v1 .
+        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }} -t ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:latest .
 
       - name: Push Docker image to Docker Hub
-        run: docker push ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:v1
+        run: 
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:latest
 
+  # --- Job Deploy lên Kubernetes ---
+  deploy:
+    
+    needs: build_and_push
+    runs-on: ubuntu-latest
+    
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      
+      - name: Set up K8s context using kubeconfig
+        uses: azure/k8s-set-context@v4 
+        with:
+          method: kubeconfig
+          
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      
+      - name: Update Kubernetes deployment image tag
+        
+        run: |
+          echo "Updating deployment image to tag: ${{ github.sha }}"
+          sed -i 's|image: .*|image: ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }}|g' manifests/deployment.yaml
+          echo "Content of manifests/deployment.yaml after update:"
+          cat manifests/deployment.yaml 
+
+      - name: Deploy application to Kubernetes
+        run: |
+          echo "Applying manifests to Kubernetes cluster..."
+          kubectl apply -f manifests/
+          echo "Checking deployment rollout status..."
+          kubectl rollout status deployment/$(kubectl get deployment -l app=flask-app -o jsonpath='{.items[0].metadata.name}') -n default --timeout=60s
+ 
 
