@@ -3,28 +3,31 @@ name: CI/CD Pipeline for Docker App
 on:
   push:
     branches:
-      - main 
+      - main
   pull_request:
     branches:
-      - main 
+      - main
+
+env:
+  # Xác định tên image để sử dụng nhất quán trong các job
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project
 
 jobs:
-
+  
   test:
-
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: false # Để các job khác tiếp tục chạy nếu một phiên bản thất bại
-      matrix:
-        python-version: ['3.8', '3.9', '3.10', '3.11'] # Liệt kê các phiên bản Python muốn test
     
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.8', '3.9', '3.10', '3.11']
     steps:
-
+      
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -33,75 +36,93 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt # Cài đặt thư viện từ requirements.txt
-          pip install pytest # Cài đặt pytest để chạy tests
+          pip install -r requirements.txt
+          pip install pytest # Đảm bảo pytest được cài đặt
 
       - name: Run tests
+        # Cần đảm bảo thư mục tests được checkout đúng cách
+        # Nếu tests nằm trong thư mục con, ví dụ 'tests/', lệnh có thể là 'pytest tests/'
         run: pytest
 
 
   build_and_push:
-
-    needs: test
-
+    needs: test # Đảm bảo job test thành công trước khi build
     runs-on: ubuntu-latest
-
+    # Chỉ chạy job này khi push lên nhánh main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-     
+      
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }} 
-          password: ${{ secrets.DOCKERHUB_TOKEN }}   
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and tag Docker image
-        run: docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }} -t ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:latest .
+        # Sử dụng biến môi trường IMAGE_NAME
+        run: |
+          docker build -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
 
       - name: Push Docker image to Docker Hub
-        run: 
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }}
+        # Đẩy cả tag SHA và tag latest
+        run: |
+          docker push $IMAGE_NAME:${{ github.sha }}
+          docker push $IMAGE_NAME:latest
 
-          
-  # --- Job Deploy lên Kubernetes ---
-  deploy:
-    
+  deploy_to_gke:
+    # Job này cần chạy sau khi build và push thành công
     needs: build_and_push
     runs-on: ubuntu-latest
-    
+    # Chỉ chạy job này khi push lên nhánh main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    permissions:
+      contents: 'read'
+      id-token: 'write' # Cần thiết cho việc xác thực với Google Cloud qua OIDC nếu sử dụng
 
     steps:
       
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      
-      - name: Set up K8s context using kubeconfig
-        uses: azure/k8s-set-context@v4 
+      # Xác thực với Google Cloud thông qua Service Account Key
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          method: kubeconfig
+          # Lưu trữ Service Account Key dưới dạng JSON trong secret GKE_SA_KEY
+          credentials_json: '${{ secrets.GKE_SA_KEY }}'
+
+      # Thiết lập gcloud CLI (không bắt buộc nếu action auth đủ, nhưng nên có)
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
+        with:
+          project_id: ${{ secrets.GKE_PROJECT }} # Secret chứa Project ID của bạn
+
+      # Lấy thông tin đăng nhập cho cụm GKE
+      - name: Get GKE credentials
+        uses: 'google-github-actions/get-gke-credentials@v1' # Hoặc phiên bản mới hơn
+        with:
+          cluster_name: ${{ secrets.GKE_CLUSTER }} # Secret chứa tên cụm GKE
+          location: ${{ secrets.GKE_ZONE }}     # Secret chứa zone của cụm GKE
+          # project_id: ${{ secrets.GKE_PROJECT }} # Thường được suy ra từ bước auth/setup-gcloud
+
+      # Triển khai ứng dụng lên GKE
+      - name: Deploy application
+        run: |
+          echo "Deploying image docker.io/$IMAGE_NAME:${{ github.sha }} to GKE"
+          # Giả sử deployment của bạn có tên được lưu trong secret GKE_DEPLOYMENT_NAME
+          # Cập nhật image cho deployment hiện có bằng kubectl set image
+          # Thay thế 'YOUR_DEPLOYMENT_NAME' bằng tên deployment thực tế của bạn hoặc sử dụng secret
+          # Thêm tiền tố 'docker.io/' để chỉ rõ registry là Docker Hub
+          # Thay thế 'default' bằng namespace của bạn nếu cần, hoặc lưu trong secret GKE_NAMESPACE
+          kubectl set image deployment/${{ secrets.GKE_DEPLOYMENT_NAME }} *=docker.io/$IMAGE_NAME:${{ github.sha }} --namespace=${{ secrets.GKE_NAMESPACE || 'default' }} --record
+
+          # Chờ cho quá trình rollout hoàn tất
+          kubectl rollout status deployment/${{ secrets.GKE_DEPLOYMENT_NAME }} --namespace=${{ secrets.GKE_NAMESPACE || 'default' }}
+
+
           
-          kubeconfig: ${{ secrets.KUBE_CONFIG }}
-
-      
-      - name: Update Kubernetes deployment image tag
-        
-        run: |
-          echo "Updating deployment image to tag: ${{ github.sha }}"
-          sed -i 's|image: .*|image: ${{ secrets.DOCKERHUB_USERNAME }}/ci_docker_project:${{ github.sha }}|g' manifests/deployment.yaml
-          echo "Content of manifests/deployment.yaml after update:"
-          cat manifests/deployment.yaml 
-
-      - name: Deploy application to Kubernetes
-        run: |
-          echo "Applying manifests to Kubernetes cluster..."
-          kubectl apply -f manifests/
-          echo "Checking deployment rollout status..."
-          DEPLOYMENT_NAME=$(kubectl get deployment -l app=flask-app -n default -o jsonpath='{.items[0].metadata.name}')
-          kubectl rollout status deployment/$DEPLOYMENT_NAME -n default --timeout=60s
  
-

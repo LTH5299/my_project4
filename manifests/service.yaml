@@ -3,13 +3,14 @@ kind: Service
 metadata:
   name: flask-app-service
 spec:
+  # Sử dụng LoadBalancer để GKE tự tạo External IP
+  type: LoadBalancer
   selector:
+    # LLabels của Pod trong deployment.yaml
     app: flask-app
   ports:
-    - protocol: TCP
-      
-      port: 80
-     
-      targetPort: 5000
-      
-  type: NodePort
+  - protocol: TCP
+    
+    port: 80
+    
+    targetPort: 5000
