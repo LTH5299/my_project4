@@ -20,4 +20,4 @@ spec:
         
         image: docker.io/DOCKERHUB_USERNAME/ci_docker_project:latest
         ports:
-        - containerPort: 5000
+        - containerPort: 5010
